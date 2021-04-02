@@ -4,7 +4,12 @@ import os
 
 from clint.textui import colored
 
-def check_dependencies(compression, crypto, progress):
+def check_dependencies(compression, crypto):
+    try:
+        subprocess.check_call(["which", "tar"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except:
+        raise click.UsageError("pyawsbackup requires the tar utility to be installed in your $PATH")
+
     try:
         subprocess.check_call(["which", "aws"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except:
@@ -22,11 +27,13 @@ def check_dependencies(compression, crypto, progress):
         except:
             raise click.BadOptionUsage("compress", "option compress requires zstd in your $PATH")
 
-    if progress:
-        try:
-            subprocess.check_call(["which", "pv"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except:
-            raise click.BadOptionUsage("progress", "option progress (default) requires pv in your $PATH")
+
+def supports_pv():
+    try:
+        subprocess.check_call(["which", "pv"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except:
+        return False
 
 
 def check_folder_exists(folder):
@@ -37,4 +44,11 @@ def color_macro(color, func):
     if color:
         return func
     else:
-        return lambda x, y, z: x
+        return lambda *args: args[0]
+
+
+def s3_url(bucket, path):
+    if path:
+        return f"s3://{bucket}/{path}"
+    else:
+        return f"s3://{bucket}"
