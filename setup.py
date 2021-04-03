@@ -23,7 +23,7 @@ setuptools.setup(
     package_dir={"": "src"},
     packages=setuptools.find_packages(where="src"),
     python_requires=">=3.6",
-    install_requires=["Click"],
+    install_requires=["Click", "clint"],
     entry_points={
         "console_scripts": [
             "pyawsbackup = pyawsbackup:cli"
