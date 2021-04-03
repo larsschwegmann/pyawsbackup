@@ -208,11 +208,11 @@ def do_backup(compress, encrypt, cert, storage_class, jobname, progress, color, 
             tarkey = subprocess.check_output(
                 ["openssl", "rand", "-hex", "16"],
                 stderr=subprocess.DEVNULL
-            ).decode("utf-8"),
+            ).decode("utf-8").splitlines()[0]
             listkey = subprocess.check_output(
                 ["openssl", "rand", "-hex", "16"],
                 stderr=subprocess.DEVNULL
-            ).decode("utf-8"),
+            ).decode("utf-8").splitlines()[0]
             puts(green("DONE"))
             sys.stdout.flush()
         except:
