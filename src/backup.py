@@ -256,7 +256,7 @@ def do_backup(compress, encrypt, cert, storage_class, jobname, progress, color, 
         (file_list_pipeline, file_list_outfile) = file_list_pipeline
     pipeline_input = file_list_pipeline.stdin if hasattr(file_list_pipeline, "stdin") else file_list_pipeline
     filelist_tar = subprocess.Popen(
-        ["tar", "-C", "/", "-cf", "-", "--format", "mtree", "--options=sha256", folder],
+        ["bsdtar", "-C", "/", "-cf", "-", "--format", "mtree", "--options=sha256", folder],
         stdout=pipeline_input,
         stderr=subprocess.DEVNULL
     )
