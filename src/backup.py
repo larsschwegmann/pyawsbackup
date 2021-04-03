@@ -37,10 +37,10 @@ def get_pv_pipe(stdout):
 
 def get_openssl_pipe_symmetric(key, stdout):
     if sys.platform == "linux":
-        cmd = ["openssl", "enc", "-aes-256-ctr", "-salt", "-pass", f"pass:{key}", "-pbkdf2"],
+        cmd = ["openssl", "enc", "-aes-256-ctr", "-salt", "-pass", f"pass:{key}", "-pbkdf2"]
     elif sys.platform == "darwin":
         # macos ships with LibreSSL which doesnt support -pbkdf2 for whatever reason
-        cmd = ["openssl", "enc", "-aes-256-ctr", "-salt", "-pass", f"pass:{key}"],
+        cmd = ["openssl", "enc", "-aes-256-ctr", "-salt", "-pass", f"pass:{key}"]
 
     openssl = subprocess.Popen(
         cmd,
