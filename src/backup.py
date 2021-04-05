@@ -4,11 +4,11 @@ import os
 import json
 import sys
 from datetime import datetime
-from clint.textui import puts, colored, indent
+from clint.textui import colored, indent
 from utils import check_folder_exists, color_macro, s3_url
 
 
-def get_s3_pipe(s3_url, storage_class):
+def get_s3_pipe(s3_url, storage_class, input):
     cmd = ["aws", "s3", "cp", "-", s3_url]
     if storage_class:
         cmd.append("--storage-class")
@@ -16,26 +16,22 @@ def get_s3_pipe(s3_url, storage_class):
 
     aws = subprocess.Popen(
         cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        # stderr=subprocess.DEVNULL
-        # universal_newlines=True
+        stdin=input if input else subprocess.PIPE,
+        stdout=subprocess.DEVNULL
     )
     return aws
 
 
-def get_pv_pipe(stdout):
+def get_pv_pipe(input):
     pv = subprocess.Popen(
-        ["pv", "-f", "-i", "1"],
-        stdin=subprocess.PIPE,
-        stdout=stdout,
-        # stderr=subprocess.PIPE
-        # universal_newlines=True
+        ["pv", "-f"],
+        stdin=input if input else subprocess.PIPE,
+        stdout=subprocess.PIPE
     )
     return pv
 
 
-def get_openssl_pipe_symmetric(key, stdout):
+def get_openssl_pipe_symmetric(key, input):
     if sys.platform == "linux":
         cmd = ["openssl", "enc", "-aes-256-ctr", "-salt", "-pass", f"pass:{key}", "-pbkdf2"]
     elif sys.platform == "darwin":
@@ -44,126 +40,78 @@ def get_openssl_pipe_symmetric(key, stdout):
 
     openssl = subprocess.Popen(
         cmd,
-        stdin=subprocess.PIPE,
-        stdout=stdout,
-        # stderr=subprocess.DEVNULL
-        # universal_newlines=True
+        stdin=input if input else subprocess.PIPE,
+        stdout=subprocess.PIPE
     )
     return openssl
 
 
-def get_openssl_pipe_asymmetric(cert, stdout):
+def get_openssl_pipe_asymmetric(cert):
     openssl = subprocess.Popen(
         ["openssl", "rsautl", "-encrypt", "-pubin", "-inkey", cert],
         stdin=subprocess.PIPE,
-        stdout=stdout,
-        # stderr=subprocess.DEVNULL
-        # universal_newlines=True
+        stdout=subprocess.PIPE
     )
     return openssl
 
 
-def get_tar_pipe(folder, compress, stdout):
-    if sys.platform == "linux":
-        if compress:
-            backup_cmd = ["tar", "-I", "zstd", "--warning=no-file-changed", "-C", "/", "-cf", "-", folder]
-        else:
-            backup_cmd = ["tar", "--warning=no-file-changed", "-C", "/", "-cf", "-", folder]
-
-        backup_tar = subprocess.Popen(
-            backup_cmd,
-            stdout=stdout,
-            # stderr=subprocess.DEVNULL
-            # universal_newlines=True
-        )
-        return backup_tar
-    elif sys.platform == "darwin":
-        # tar -I only work with GNU tar, macos ships with BSD tar
-        zstd = None
-        if compress:
-            zstd = subprocess.Popen(
-                ["zstd"],
-                stdin=subprocess.PIPE,
-                stdout=stdout,
-                # stderr=subprocess.DEVNULL
-                # universal_newlines=True
-            )
-
-        backup_tar = subprocess.Popen(
-            ["tar", "--warning=no-file-changed", "-C", "/", "-cf", "-", folder],
-            stdout=zstd.stdin if zstd else stdout,
-            # stderr=subprocess.DEVNULL
-            # universal_newlines=True
-        )
-        return backup_tar
-
-
-def build_upload_pipeline_symmetric(dry_run, progress, encrypt, key, storage_class, bucket, destfile):
-    # Build subprocess chain
-    # tar (with/without compression if compress) | openssl (if encrypt) | pv (if progress) | aws cp ( if not dry-run ) / fd (if dry-run)
-    # Pipe logic inspired by https://stackoverflow.com/a/9164238/1043495
-
-    # Build chain from back to front
-    pipe = []
-    if dry_run:
-        outfile = os.path.join(bucket, destfile)
-        out = open(outfile, "wb")
-        next_output = out
+def get_tar_pipe(folder, compress):
+    tar_name = "gtar" if sys.platform == "darwin" else "tar"
+    if compress:
+        #if sys.platform == "darwin":
+        #    raise RuntimeError("Compression with zstd not supported on macos with BSD tar")
+        backup_cmd = [tar_name, "-I", "zstd", "--warning=no-file-changed", "-C", "/", "-cf", "-", folder]
     else:
-        aws = get_s3_pipe(s3_url(bucket, destfile), storage_class)
-        pipe.append(aws)
-        next_output = aws
+        backup_cmd = [tar_name, "--warning=no-file-changed", "-C", "/", "-cf", "-", folder]
 
-    if progress:
-        input = next_output.stdin if hasattr(next_output, "stdin") else next_output
-        pv = get_pv_pipe(input)
-        pipe.append(pv)
-        next_output = pv
+    backup_tar = subprocess.Popen(
+        backup_cmd,
+        stdout=subprocess.PIPE
+    )
+    return backup_tar
+
+
+def build_upload_pipeline_symmetric(input, dry_run, progress, encrypt, key, storage_class, bucket, destfile):
+    # Build subprocess chain
+    pipe = [input]
 
     if encrypt:
-        input = next_output.stdin if hasattr(next_output, "stdin") else next_output
-        openssl = get_openssl_pipe_symmetric(key, input)
+        openssl = get_openssl_pipe_symmetric(key, pipe[-1].stdout)
         pipe.append(openssl)
-        next_output = openssl
+
+    if progress:
+        pv = get_pv_pipe(pipe[-1].stdout)
+        pipe.append(pv)
 
     if dry_run:
-        return (pipe, outfile)
+        # TODO use dd
+        pass
     else:
-        return pipe
+        aws = get_s3_pipe(s3_url(bucket, destfile), storage_class, pipe[-1].stdout)
+        pipe.append(aws)
+
+    return pipe
 
 
 def build_upload_pipeline_asymmetric(dry_run, progress, encrypt, cert, storage_class, bucket, destfile):
-    # Build subprocess chain
-    # tar (with/without compression if compress) | openssl (if encrypt) | pv (if progress) | aws cp ( if not dry-run ) / fd (if dry-run)
-    # Pipe logic inspired by https://stackoverflow.com/a/9164238/1043495
-
-    # Build chain from back to front
+    # Build subprocess pipeline chain
     pipe = []
-    if dry_run:
-        outfile = os.path.join(bucket, destfile)
-        out = open(outfile, "wb")
-        next_output = out
-    else:
-        aws = get_s3_pipe(s3_url(bucket, destfile), storage_class)
-        pipe.append(aws)
-        next_output = aws
+    if encrypt:
+        openssl = get_openssl_pipe_asymmetric(cert)
+        pipe.append(openssl)
 
     if progress:
-        input = next_output.stdin if hasattr(next_output, "stdin") else next_output
-        pv = get_pv_pipe(input)
+        pv = get_pv_pipe(pipe[-1].stdout if len(pipe) > 0 else None)
         pipe.append(pv)
-        next_output = pv
-
-    if encrypt:
-        input = next_output.stdin if hasattr(next_output, "stdin") else next_output
-        openssl = get_openssl_pipe_asymmetric(cert, input)
-        pipe.append(openssl)
-        next_output = openssl
 
     if dry_run:
-        return (pipe, outfile)
+        # TODO use dd
+        pass
     else:
-        return pipe
+        aws = get_s3_pipe(s3_url(bucket, destfile), storage_class, pipe[-1].stdout if len(pipe) > 0 else None)
+        pipe.append(aws)
+
+    return pipe
 
 
 # Encryption logic heavily inspired and partly adopted by https://github.com/leanderseidlitz/aws-backup/blob/master/awsbackup.sh
@@ -178,6 +126,9 @@ def do_backup(compress, encrypt, cert, storage_class, jobname, progress, color, 
     if not jobname:
         jobname = os.path.basename(os.path.normpath(folder))
 
+    #if compress and sys.platform == "darwin":
+    #    raise RuntimeError("Compression not support on macOS")
+
     # Check if source directory exists first
     if not check_folder_exists(folder):
         raise click.UsageError(f"no directory found at src path {folder}")
@@ -187,22 +138,22 @@ def do_backup(compress, encrypt, cert, storage_class, jobname, progress, color, 
 
     # Print what we are going to do
     if dry_run:
-        puts(f"Backing up {cyan(folder)} to local folder {cyan(bucket)} (dry-run)")
+        print(f"Backing up {cyan(folder)} to local folder {cyan(bucket)} (dry-run)")
     else:
-        puts(f"Backing up {cyan(folder)} to AWS S3 bucket {yellow(bucket)} (class = {yellow(storage_class)})")
+        print(f"Backing up {cyan(folder)} to AWS S3 bucket {yellow(bucket)} (class = {yellow(storage_class)})")
 
-    puts(f"Jobname: {cyan(jobname)}")
+    print(f"Jobname: {cyan(jobname)}")
 
 
     # Create the parent directory first
     jobdir_name = os.path.join(jobname, date)
     if dry_run:
         # Create directory locally
-        puts("Creating job directory...", newline=False)
+        print("Creating job directory...", end="")
         try:
             jobdir = os.path.join(bucket, jobdir_name)
             os.mkdir(jobdir)
-            puts(green("DONE"))
+            print(green("DONE"))
         except:
             raise RuntimeError(f"Could not create job directory at path {jobdir}")
 
@@ -210,8 +161,7 @@ def do_backup(compress, encrypt, cert, storage_class, jobname, progress, color, 
     listkey = None
     if encrypt:
         # Generate symmetric keys for tar + list
-        puts("Generating symmetric keys for encryption...", newline=False)
-        sys.stdout.flush()
+        print("Generating symmetric keys for encryption...", end="", flush=True)
         try:
             tarkey = subprocess.check_output(
                 ["openssl", "rand", "-hex", "16"],
@@ -221,8 +171,7 @@ def do_backup(compress, encrypt, cert, storage_class, jobname, progress, color, 
                 ["openssl", "rand", "-hex", "16"],
                 stderr=subprocess.DEVNULL
             ).decode("utf-8").splitlines()[0]
-            puts(green("DONE"))
-            sys.stdout.flush()
+            print(green("DONE"), flush=True)
         except:
             raise RuntimeError(f"Could not generate symmetric keys for backup job")
 
@@ -238,83 +187,52 @@ def do_backup(compress, encrypt, cert, storage_class, jobname, progress, color, 
         else:
             meta_name = f"{jobname}.meta"
 
-        puts("Sending Metafile...", newline=False)
-        sys.stdout.flush()
+        print("Sending Metafile...", end="" if not progress else "\n", flush=True)
 
         # Build chain from back to front
         meta_pipeline = build_upload_pipeline_asymmetric(dry_run, progress, encrypt, cert, None, bucket,
                                                          os.path.join(jobdir_name, meta_name))
-        if dry_run:
-            (meta_pipeline, meta_outfile) = meta_pipeline
-        print(f"Waiting for {' '.join(meta_pipeline[-1].args)} ...", end="", flush=True)
-        meta_pipeline[-1].communicate(meta_bin)
+        meta_pipeline[0].communicate(meta_bin)
+        for i in range(1, len(meta_pipeline)):
+            meta_pipeline[i - 1].stdout.close()
+            meta_pipeline[i].wait()
+
         print(green("DONE"), flush=True)
-        for pipe in reversed(meta_pipeline[:-1]):
-            print(f"Waiting for {' '.join(pipe.args)} ...", end="", flush=True)
-            pipe.wait()
-            print(green("DONE"), flush=True)
-
-        if dry_run:
-            meta_outfile.close()
-
-        puts(green("DONE"))
-        sys.stdout.flush()
 
     # Send file list
-    puts("Sending file list...")
-    sys.stdout.flush()
+    print("Sending file list...", flush=True)
     file_list_name = f"{jobname}.list.aes" if encrypt else f"{jobname}.list"
-    file_list_pipeline = build_upload_pipeline_symmetric(dry_run, False, encrypt, listkey, None, bucket,
-                                                         os.path.join(jobdir_name, file_list_name))
-    if dry_run:
-        (file_list_pipeline, file_list_outfile) = file_list_pipeline
-        pipeline_input = file_list_outfile
-    else:
-        pipeline_input = file_list_pipeline[-1].stdin
+
     filelist_tar = subprocess.Popen(
         ["bsdtar", "-C", "/", "-cf", "-", "--format", "mtree", "--options=sha256", folder],
-        stdout=pipeline_input,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL
     )
-    print(f"Waiting for {' '.join(filelist_tar.args)} ...", end="", flush=True)
-    filelist_tar.wait()
+
+    file_list_pipeline = build_upload_pipeline_symmetric(filelist_tar, dry_run, False, encrypt, listkey, None, bucket,
+                                                         os.path.join(jobdir_name, file_list_name))
+
+    for i in range(1, len(file_list_pipeline)):
+        file_list_pipeline[i - 1].stdout.close()
+        file_list_pipeline[i].wait()
+
     print(green("DONE"), flush=True)
-    for pipe in reversed(file_list_pipeline):
-        print(f"Waiting for {' '.join(pipe.args)} ...", end="", flush=True)
-        pipe.wait()
-        print(green("DONE"), flush=True)
-
-    if dry_run:
-        file_list_outfile.close()
-
-    puts(green("DONE"))
-    sys.stdout.flush()
 
     # Send actual backup
-    puts("Sending backup...")
-    sys.stdout.flush()
+    print("Sending backup...", flush=True)
     backup_name = f"{jobname}.tar"
     if compress:
         backup_name = f"{backup_name}.zstd"
     if encrypt:
         backup_name = f"{backup_name}.aes"
 
-    backup_pipeline = build_upload_pipeline_symmetric(dry_run, progress, encrypt, tarkey, storage_class, bucket,
+    backup_tar = get_tar_pipe(folder, compress)
+
+    backup_pipeline = build_upload_pipeline_symmetric(backup_tar, dry_run, progress, encrypt, tarkey, storage_class, bucket,
                                                       os.path.join(jobdir_name, backup_name))
-    if dry_run:
-        (backup_pipeline, backup_outfile) = backup_pipeline
-        pipeline_input = backup_pipeline
-    else:
-        pipeline_input = backup_pipeline[-1].stdin
 
-    backup_tar = get_tar_pipe(folder, compress, pipeline_input)
-    backup_tar.wait()
+    for i in range(1, len(backup_pipeline)):
+        backup_pipeline[i - 1].stdout.close()
+        backup_pipeline[i].wait()
 
-    for pipe in reversed(backup_pipeline):
-        pipe.wait()
-
-    if dry_run:
-        backup_outfile.close()
-
-    puts(green("DONE"))
-    sys.stdout.flush()
+    print(green("DONE"))
