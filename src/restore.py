@@ -1,11 +1,12 @@
 import subprocess
 import click
-from utils import color_macro, s3_url, check_folder_exists
+import re
+from utils import color_macro, s3_url, check_folder_exists, check_file_exists
 from clint.textui import colored, puts
 from datetime import datetime
 import os
 
-def do_restore(color, progress, date, bucket, jobname, target):
+def do_restore(color, progress, date, key, bucket, jobname, target):
     # Colors
     yellow = color_macro(color, colored.yellow)
     cyan = color_macro(color, colored.cyan)
@@ -49,6 +50,46 @@ def do_restore(color, progress, date, bucket, jobname, target):
             print()
             raise click.BadOptionUsage("date", red(f"No backup found for date {date}"))
 
+    # Next check files, determine if encrypted, compressed or both
+    print(f"Checking files in {bucket}/{jobname}/{date}...", end="")
+
+    try:
+        backup_content_str = subprocess.check_output(
+            ["aws", "s3", "ls", s3_url(bucket, os.path.join(jobname, date) + "/")]
+        ).decode("utf-8")
+        backup_content = [x.rsplit(" ", 1)[1].strip("/") for x in backup_content_str.splitlines()]
+        puts(green("DONE"))
+    except:
+        raise RuntimeError(f"Could not list files in {bucket}/{jobname}/{date}")
+
+    encrypted = any(".meta.enc" for s in backup_content)
+    compressed = any(".tar.zstd" for s in backup_content)
+
+    print(f"Backup is{' not' if not encrypted else ''} encrypted and{' not' if not compressed else ''} compressed")
 
 
-    pass
+    if encrypted:
+        if not key or not check_file_exists(key):
+            raise click.BadOptionUsage("key", "Key is missing, backup is encrypted")
+
+        print("Downloading metafile...", end="", flush=True)
+        try:
+            metafile_url = s3_url(bucket, os.path.join(jobname, date, f"{jobname}.meta.enc"))
+            # print(metafile_url)
+
+            openssl = subprocess.Popen(
+                ["openssl", "rsautl", "-decrypt", "-inkey", key],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE
+            )
+            openssl_out = openssl.stdout
+
+            aws = subprocess.Popen(
+                ["aws", "s3", "cp", metafile_url, "-"],
+                stdout=openssl.stdin
+            )
+            aws.wait()
+            print("yottek", flush=True)
+            print(openssl_out.readline())
+        except:
+            raise RuntimeError(f"Could not download/decrypt metafile")

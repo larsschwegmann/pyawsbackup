@@ -87,15 +87,16 @@ def list_contents(color, date, bucket, jobname):
 @click.option("--color/--no-color", default=True, is_flag=True)
 @click.option("--progress/--no-progress", default=True, is_flag=True)
 @click.option("--date", type=str)
+@click.option("--key", type=str)
 @click.argument("bucket")
 @click.argument("jobname")
 @click.argument("target")
-def restore(color, progress, date, bucket, jobname, target):
+def restore(color, progress, date, key, bucket, jobname, target):
     yellow = color_macro(color, colored.yellow)
     pv_support = supports_pv()
     if not pv_support:
         puts(f"{yellow('Warning')}: progress enabled, but pv not found in PATH. Falling back to no-progress")
-    do_restore(color, progress and pv_support, date, bucket, jobname, target)
+    do_restore(color, progress and pv_support, date, key, bucket, jobname, target)
 
 
 if __name__ == '__main__':

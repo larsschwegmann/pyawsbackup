@@ -26,7 +26,7 @@ def get_s3_pipe(s3_url, storage_class):
 
 def get_pv_pipe(stdout):
     pv = subprocess.Popen(
-        ["pv", "-f", "-i", "5"],
+        ["pv", "-f", "-i", "1"],
         stdin=subprocess.PIPE,
         stdout=stdout,
         # stderr=subprocess.PIPE
@@ -104,28 +104,32 @@ def build_upload_pipeline_symmetric(dry_run, progress, encrypt, key, storage_cla
     # Pipe logic inspired by https://stackoverflow.com/a/9164238/1043495
 
     # Build chain from back to front
+    pipe = []
     if dry_run:
         outfile = os.path.join(bucket, destfile)
         out = open(outfile, "wb")
         next_output = out
     else:
         aws = get_s3_pipe(s3_url(bucket, destfile), storage_class)
+        pipe.append(aws)
         next_output = aws
 
     if progress:
         input = next_output.stdin if hasattr(next_output, "stdin") else next_output
         pv = get_pv_pipe(input)
+        pipe.append(pv)
         next_output = pv
 
     if encrypt:
         input = next_output.stdin if hasattr(next_output, "stdin") else next_output
         openssl = get_openssl_pipe_symmetric(key, input)
+        pipe.append(openssl)
         next_output = openssl
 
     if dry_run:
-        return (next_output, out)
+        return (pipe, outfile)
     else:
-        return next_output
+        return pipe
 
 
 def build_upload_pipeline_asymmetric(dry_run, progress, encrypt, cert, storage_class, bucket, destfile):
@@ -134,28 +138,32 @@ def build_upload_pipeline_asymmetric(dry_run, progress, encrypt, cert, storage_c
     # Pipe logic inspired by https://stackoverflow.com/a/9164238/1043495
 
     # Build chain from back to front
+    pipe = []
     if dry_run:
         outfile = os.path.join(bucket, destfile)
         out = open(outfile, "wb")
         next_output = out
     else:
         aws = get_s3_pipe(s3_url(bucket, destfile), storage_class)
+        pipe.append(aws)
         next_output = aws
 
     if progress:
         input = next_output.stdin if hasattr(next_output, "stdin") else next_output
         pv = get_pv_pipe(input)
+        pipe.append(pv)
         next_output = pv
 
     if encrypt:
         input = next_output.stdin if hasattr(next_output, "stdin") else next_output
         openssl = get_openssl_pipe_asymmetric(cert, input)
+        pipe.append(openssl)
         next_output = openssl
 
     if dry_run:
-        return (next_output, out)
+        return (pipe, outfile)
     else:
-        return next_output
+        return pipe
 
 
 # Encryption logic heavily inspired and partly adopted by https://github.com/leanderseidlitz/aws-backup/blob/master/awsbackup.sh
@@ -238,7 +246,13 @@ def do_backup(compress, encrypt, cert, storage_class, jobname, progress, color, 
                                                          os.path.join(jobdir_name, meta_name))
         if dry_run:
             (meta_pipeline, meta_outfile) = meta_pipeline
-        meta_pipeline.communicate(meta_bin)
+        print(f"Waiting for {' '.join(meta_pipeline[-1].args)} ...", end="", flush=True)
+        meta_pipeline[-1].communicate(meta_bin)
+        print(green("DONE"), flush=True)
+        for pipe in reversed(meta_pipeline[:-1]):
+            print(f"Waiting for {' '.join(pipe.args)} ...", end="", flush=True)
+            pipe.wait()
+            print(green("DONE"), flush=True)
 
         if dry_run:
             meta_outfile.close()
@@ -250,17 +264,26 @@ def do_backup(compress, encrypt, cert, storage_class, jobname, progress, color, 
     puts("Sending file list...")
     sys.stdout.flush()
     file_list_name = f"{jobname}.list.aes" if encrypt else f"{jobname}.list"
-    file_list_pipeline = build_upload_pipeline_symmetric(dry_run, progress, encrypt, listkey, None, bucket,
+    file_list_pipeline = build_upload_pipeline_symmetric(dry_run, False, encrypt, listkey, None, bucket,
                                                          os.path.join(jobdir_name, file_list_name))
     if dry_run:
         (file_list_pipeline, file_list_outfile) = file_list_pipeline
-    pipeline_input = file_list_pipeline.stdin if hasattr(file_list_pipeline, "stdin") else file_list_pipeline
+        pipeline_input = file_list_outfile
+    else:
+        pipeline_input = file_list_pipeline[-1].stdin
     filelist_tar = subprocess.Popen(
         ["bsdtar", "-C", "/", "-cf", "-", "--format", "mtree", "--options=sha256", folder],
         stdout=pipeline_input,
         stderr=subprocess.DEVNULL
     )
+    print(f"Waiting for {' '.join(filelist_tar.args)} ...", end="", flush=True)
     filelist_tar.wait()
+    print(green("DONE"), flush=True)
+    for pipe in reversed(file_list_pipeline):
+        print(f"Waiting for {' '.join(pipe.args)} ...", end="", flush=True)
+        pipe.wait()
+        print(green("DONE"), flush=True)
+
     if dry_run:
         file_list_outfile.close()
 
@@ -280,11 +303,16 @@ def do_backup(compress, encrypt, cert, storage_class, jobname, progress, color, 
                                                       os.path.join(jobdir_name, backup_name))
     if dry_run:
         (backup_pipeline, backup_outfile) = backup_pipeline
-
-    pipeline_input = backup_pipeline.stdin if hasattr(backup_pipeline, "stdin") else backup_pipeline
+        pipeline_input = backup_pipeline
+    else:
+        pipeline_input = backup_pipeline[-1].stdin
 
     backup_tar = get_tar_pipe(folder, compress, pipeline_input)
     backup_tar.wait()
+
+    for pipe in reversed(backup_pipeline):
+        pipe.wait()
+
     if dry_run:
         backup_outfile.close()
 

@@ -39,6 +39,8 @@ def supports_pv():
 def check_folder_exists(folder):
     return os.path.exists(folder) and os.path.isdir(folder)
 
+def check_file_exists(file):
+    return os.path.exists(file) and os.path.isfile(file)
 
 def color_macro(color, func):
     if color:
